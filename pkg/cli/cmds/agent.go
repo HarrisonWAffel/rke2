@@ -88,8 +88,18 @@ func agentSubcommands() cli.Commands {
 func AgentRun(clx *cli.Context) error {
 	validateCloudProviderName(clx, Agent)
 	validateProfile(clx, Agent)
-	if err := windows.StartService(); err != nil {
+	isWinService, err := windows.StartService()
+	if err != nil {
 		return err
 	}
-	return rke2.Agent(clx, config)
+
+	err = rke2.Agent(clx, config)
+	if isWinService {
+		monitorErr := windows.MonitorProcessExit()
+		if monitorErr != nil {
+			return monitorErr
+		}
+	}
+
+	return err
 }

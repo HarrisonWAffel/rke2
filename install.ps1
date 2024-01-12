@@ -431,7 +431,6 @@ function Copy-LocalBinaryTarball() {
     elseif (Test-Path -Path "$Path/rke2.$suffix-$CommitHash.tar.zst" -PathType Leaf) {
         Write-InfoLog "staging local binary tarball from $ArtifactPath/rke2.$suffix-$CommitHash.tar.zst"
         Copy-Item -Path "$Path/rke2.$suffix-$CommitHash.tar.zst" -Destination $DestinationPath -Force
-        ]    
     }
 }
 

@@ -4,10 +4,11 @@
 package windows
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"os/exec"
 	"time"
-
-	"golang.org/x/sys/windows"
 
 	"github.com/k3s-io/k3s/pkg/version"
 	"github.com/pkg/errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/rancher/wins/pkg/profilings"
 	"github.com/rancher/wrangler/pkg/signals"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -40,7 +42,6 @@ func (h *service) Execute(_ []string, requests <-chan svc.ChangeRequest, statuse
 			}
 
 			logrus.Infof("Windows Service is shutting down gracefully")
-			time.Sleep(10 * time.Second) // give context time to cancel
 			statuses <- svc.Status{State: svc.StopPending}
 			statuses <- svc.Status{State: svc.Stopped}
 			return false, 0
@@ -48,22 +49,22 @@ func (h *service) Execute(_ []string, requests <-chan svc.ChangeRequest, statuse
 	}
 	return false, 0
 }
-func StartService() error {
 
+func StartService() (bool, error) {
 	if ok, err := svc.IsWindowsService(); err != nil || !ok {
-		return err
+		return ok, err
 	}
 
 	// ETW tracing
 	etw, err := logs.NewEtwProviderHook(version.Program)
 	if err != nil {
-		return errors.Wrap(err, "could not create ETW provider logrus hook")
+		return false, errors.Wrap(err, "could not create ETW provider logrus hook")
 	}
 	logrus.AddHook(etw)
 
 	el, err := logs.NewEventLogHook(version.Program)
 	if err != nil {
-		return errors.Wrap(err, "could not create eventlog logrus hook")
+		return false, errors.Wrap(err, "could not create eventlog logrus hook")
 	}
 	logrus.AddHook(el)
 
@@ -78,6 +79,40 @@ func StartService() error {
 			logrus.Fatalf("Windows Service error, exiting: %s", err)
 		}
 	}()
+
+	return true, nil
+}
+
+// MonitorProcessExit ensures that the kubelet, kube-proxy, calico-node, and containerd processes have stopped running.
+func MonitorProcessExit() error {
+	processMonitorCtx, done := context.WithDeadline(context.Background(), time.Now().Add(time.Second*10))
+	defer done()
+
+	pwsh := `
+ 	$ErrorActionPreference = "SilentlyContinue"
+	while(1) {
+		$successfulExit = $true
+		foreach ($process in @("kubelet","kube-proxy","calico-node","containerd"))
+		{
+			if (Get-Process -Name $process) {
+				$successfulExit = $false
+				break
+			}
+		}
+		if ($successfulExit) {
+			exit 0
+		}
+		sleep 1
+	}
+`
+
+	logrus.Infof("Waiting for all processes to exit...")
+
+	cmd := exec.CommandContext(processMonitorCtx, "powershell", pwsh)
+	o, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to ensure all processes have exited: %s: %w", string(o), err)
+	}
 
 	return nil
 }
