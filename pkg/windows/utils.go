@@ -31,6 +31,19 @@ var (
 	}
 )
 
+func getCalicoHnsNetwork() (hcsshim.HNSNetwork, error) {
+	existingNet, err := hcsshim.GetHNSNetworkByName(CalicoHnsNetworkName)
+	if err != nil {
+		return hcsshim.HNSNetwork{}, err
+	}
+
+	if existingNet == nil {
+		return hcsshim.HNSNetwork{}, fmt.Errorf("returned HNS network was nil")
+	}
+
+	return *existingNet, nil
+}
+
 // createHnsNetwork creates the network that will connect nodes and returns its managementIP
 func createHnsNetwork(backend string, networkAdapter string) (string, error) {
 	var network hcsshim.HNSNetwork

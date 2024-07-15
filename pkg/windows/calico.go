@@ -265,6 +265,7 @@ func (c *Calico) createKubeConfigAndClient(ctx context.Context, restConfig *rest
 func (c *Calico) Start(ctx context.Context) error {
 	logPath := filepath.Join(c.CNICfg.ConfigPath, "logs")
 
+	// note; this should probably be in a loop like the other core components, but idk
 	// Wait for the node to be registered in the cluster
 	if err := wait.PollImmediateWithContext(ctx, 5*time.Second, 5*time.Minute, func(ctx context.Context) (bool, error) {
 		_, err := c.KubeClient.CoreV1().Nodes().Get(ctx, c.CNICfg.Hostname, metav1.GetOptions{})
@@ -292,19 +293,27 @@ func (c *Calico) Start(ctx context.Context) error {
 	// Delete policies in case calico network is being reused
 	policies, _ := hcsshim.HNSListPolicyListRequest()
 	for _, policy := range policies {
-		policy.Delete()
+		_, err := policy.Delete()
+		if err != nil {
+			logrus.Warnf("Error encountered deleting network policy %s: %v", policy.ID, err)
+		}
 	}
 
 	logrus.Info("Calico started correctly")
-
 	return nil
 }
 
 // generateCalicoNetworks creates the overlay networks for internode networking
 func (c *Calico) generateCalicoNetworks() error {
-	if err := deleteAllNetworks(); err != nil {
-		return errors.Wrapf(err, "failed to delete all networks before bootstrapping calico")
-	}
+	// todo; WHY do we delete them all? What is the harm of keeping them around?
+	// 		Is it because we don't have a way to track ones that are outdated or leaked?
+	//		Or is it just because we don't know what might have been running on the node
+	//		before us and we want to own all of the networking components on the node?
+	//		It doesn't make a lot of sense at face value, in the same way that the system-agent-installer
+	//		constantly starting and stopping the service doesn't make sense. It feels rushed and unquestioned.
+	//if err := deleteAllNetworks(); err != nil {
+	//	return errors.Wrapf(err, "failed to delete all networks before bootstrapping calico")
+	//}
 
 	// There are four ways to select the vxlan interface. In order of priority:
 	// 1 - VXLAN_ADAPTER env variable
@@ -326,14 +335,27 @@ func (c *Calico) generateCalicoNetworks() error {
 		}
 	}
 
-	mgmt, err := createHnsNetwork(c.CNICfg.OverlayEncap, networkAdapter)
-	if err != nil {
-		return err
+	externalNet, err := getCalicoHnsNetwork()
+	notfound := err != nil && strings.Contains(strings.ToLower(err.Error()), "not found")
+	if err != nil && !notfound {
+		return fmt.Errorf("failed to query External Calico hns network: %v", err)
+	}
+
+	var mgmtIp string
+	if notfound {
+		mgmtIp, err = createHnsNetwork(c.CNICfg.OverlayEncap, networkAdapter)
+		if err != nil {
+			return err
+		}
+		logrus.Infof("Successfully created new Calico External HNS Network")
+	} else {
+		logrus.Infof("Found existing External Calico HNS Network")
+		mgmtIp = externalNet.ManagementIP
 	}
 
 	if c.CNICfg.Platform == "ec2" || c.CNICfg.Platform == "gce" {
 		logrus.Debugf("recreating metadata route because platform is: %s", c.CNICfg.Platform)
-		if err := setMetaDataServerRoute(mgmt); err != nil {
+		if err := setMetaDataServerRoute(mgmtIp); err != nil {
 			return err
 		}
 	}
@@ -442,6 +464,7 @@ func startFelix(ctx context.Context, config *CalicoConfig, logPath string) {
 		fmt.Sprintf("FELIX_FELIXHOSTNAME=%s", config.Hostname),
 		fmt.Sprintf("FELIX_VXLANVNI=%s", config.VxlanVNI),
 		fmt.Sprintf("FELIX_DATASTORETYPE=%s", config.DatastoreType),
+		fmt.Sprintf("FELIX_LOGSEVERITYSCREEN=%s", "Debug"),
 	}
 
 	// Add OS variables related to Felix. As they come after, they'll overwrite the previous ones
@@ -472,6 +495,7 @@ func startCalico(ctx context.Context, config *CalicoConfig, logPath string) erro
 		fmt.Sprintf("CALICO_NODENAME_FILE=%s", config.NodeNameFile),
 		fmt.Sprintf("CALICO_NETWORKING_BACKEND=%s", config.OverlayEncap),
 		fmt.Sprintf("CALICO_DATASTORE_TYPE=%s", config.DatastoreType),
+		fmt.Sprintf("CALICO_STARTUP_LOGLEVEL=%s", "DEBUG"),
 		fmt.Sprintf("IP_AUTODETECTION_METHOD=%s", config.IPAutoDetectionMethod),
 		fmt.Sprintf("VXLAN_VNI=%s", config.VxlanVNI),
 	}
